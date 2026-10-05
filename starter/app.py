@@ -239,18 +239,34 @@ def history():
         
 @app.route('/dump', methods = ['GET'])
 def dump():
-    client_uuid = request.cookies.get("boogle_id")
 
-    if client_uuid:
-        returned_searches = get_search_queries(client_uuid)
-        first_seen = get_first_seen(client_uuid)
-        last_seen = get_last_seen(client_uuid)
-        lastest_ip = get_latest_ip(client_uuid)
-        ips = get_all_ips(client_uuid)
-        res = make_response({ "client_id": f"{client_uuid}", "first_seen": f"{first_seen}", "last_seen": f"{last_seen}", "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
-        return res
-    else:
-        return []
+        # Connet app with database "mydb"
+        conn = get_db_connection()
+    
+        # Open a cursor to perform database operations
+        cur = conn.cursor()
+
+        # Get the biggest search id so far
+        cur.execute('SELECT client_id FROM clients')
+
+        clients = cur.fetchall()
+
+        output = []
+
+        if clients:
+            for client in clients:
+                client_uuid = str(client[0])
+                returned_searches = get_search_queries(client_uuid)
+                first_seen = get_first_seen(client_uuid)
+                last_seen = get_last_seen(client_uuid)
+                lastest_ip = get_latest_ip(client_uuid)
+                ips = get_all_ips(client_uuid)
+
+                output.append({"client_id": f"{client_uuid}", "first_seen": f"{first_seen}", "last_seen": f"{last_seen}", "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
+        
+            res = make_response({"clients": output})
+            return res
+
     
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port="8000")
