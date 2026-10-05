@@ -36,8 +36,11 @@ def get_first_seen(client_uuid):
     cur = conn.cursor()
     # Retrieve first seen
     cur.execute('SELECT first_seen FROM clients WHERE client_id = %s', (client_uuid,))
-    first_seen = cur.fetchall()[0]
-    return str(first_seen)
+    row = cur.fetchall()
+
+    if row is None:
+        return None
+    return str(row[0])
 
 # Get last_seen
 def get_last_seen(client_uuid):
@@ -47,8 +50,10 @@ def get_last_seen(client_uuid):
     cur = conn.cursor()
     # Retrieve last seen
     cur.execute('SELECT last_seen FROM clients WHERE client_id = %s', (client_uuid,))
-    last_seen = cur.fetchall()[0]
-    return str(last_seen)
+    row = cur.fetchall()
+    if row is None:
+        return None
+    return str(row[0])
 
 def update_last_seen(client_uuid, current_timestamp):
     # Connet app with database "mydb"
@@ -125,12 +130,14 @@ def get_latest_ip(client_uuid):
     cur = conn.cursor()
 
     # Get the lastest request by ts and request id
-    cur.execute('SELECT * FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC LIMIT 1',(client_uuid,))
-    row = cur.fetchall()[0]
+    cur.execute('SELECT ip FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC LIMIT 1',(client_uuid,))
+    row = cur.fetchall()
     # Latest ip
-    latest_ip = row[3]
 
-    return str(latest_ip)
+    if row is None:
+        return None
+
+    return str(row[0])
 
 def get_all_ips(client_uuid):
     # Connet app with database "mydb"
