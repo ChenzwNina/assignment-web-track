@@ -35,7 +35,7 @@ def get_first_seen(client_uuid):
     # Open a cursor to perform database operations
     cur = conn.cursor()
     # Retrieve first seen
-    cur.execute('SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s', (client_uuid,))
+    cur.execute("""SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
     row = cur.fetchall()
 
     if row is None:
@@ -49,7 +49,7 @@ def get_last_seen(client_uuid):
     # Open a cursor to perform database operations
     cur = conn.cursor()
     # Retrieve last seen
-    cur.execute('SELECT to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s', (client_uuid,))
+    cur.execute("""SELECT to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
     row = cur.fetchall()
     if row is None:
         return None
