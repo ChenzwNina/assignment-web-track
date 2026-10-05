@@ -18,7 +18,7 @@ def get_search_queries(client_uuid):
     # Open a cursor to perform database operations
     cur = conn.cursor()
     # Retrieve search results from searches table
-    cur.execute('SELECT query, ts FROM searches WHERE client_id = %s', (client_uuid,))
+    cur.execute('SELECT query, ts FROM searches WHERE client_id = %s ORDER BY ts DESC, search_id DESC', (client_uuid,))
     retreived_items = cur.fetchall()
     returned_searches = []
 
@@ -36,7 +36,7 @@ def get_first_seen(client_uuid):
     cur = conn.cursor()
     # Retrieve first seen
     cur.execute("""SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
-    row = cur.fetchall()
+    row = cur.fetchone()
 
     if row is None:
         return None
@@ -50,7 +50,7 @@ def get_last_seen(client_uuid):
     cur = conn.cursor()
     # Retrieve last seen
     cur.execute("""SELECT to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
-    row = cur.fetchall()
+    row = cur.fetchone()
     if row is None:
         return None
     return row[0]
@@ -192,7 +192,7 @@ def jsontest():
 @app.route('/search', methods = ['GET'])
 def search():
     # print(request.path)
-    search_query = request.args.get('q')
+    search_query = request.args.get('q', "")
     if not search_query.strip():
         print('whitespace')
         response = redirect('/')
@@ -229,7 +229,7 @@ def history():
         # If the client is not a new client
         if client_uuid:
             returned_searches = get_search_queries(client_uuid)
-            res = make_response({ "client_id": f"{client_uuid}", "searches": returned_searches.reverse()})
+            res = make_response({ "client_id": f"{client_uuid}", "searches": returned_searches})
             # print(res.content_type)
             return res
         
@@ -261,7 +261,7 @@ def dump():
             lastest_ip = get_latest_ip(client_uuid)
             ips = get_all_ips(client_uuid)
 
-            output.append({"client_id": f"{client_uuid}", "first_seen": f"{first_seen}", "last_seen": f"{last_seen}", "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
+            output.append({"client_id": f"{client_uuid}", "first_seen": first_seen, "last_seen": last_seen, "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
     
         res = make_response({"clients": output})
         return res
