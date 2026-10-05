@@ -131,7 +131,7 @@ def get_latest_ip(client_uuid):
 
     # Get the lastest request by ts and request id
     cur.execute('SELECT ip FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC LIMIT 1',(client_uuid,))
-    row = cur.fetchall()
+    row = cur.fetchone()
     # Latest ip
 
     if row is None:
