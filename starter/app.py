@@ -12,6 +12,39 @@ from pathlib import Path
 
 app = Flask(__name__)
 
+from threading import Lock
+
+BLOCKED_FILE = Path(__file__).resolve().parent / "blocked_advertisers.json"
+blocked_lock = Lock()
+
+def load_blocked_domains():
+    if not BLOCKED_FILE.exists():
+        return {"badv": []}
+
+    with open(BLOCKED_FILE, "r") as file:
+        return json.load(file)
+
+
+def get_blocked_domains():
+    with blocked_lock:
+        data = load_blocked_domains()
+        return data.get("badv", [])
+
+
+def save_blocked_domains(domains):
+    with blocked_lock:
+        data = load_blocked_domains()
+
+        existing = data.get("badv", [])
+        data["badv"] = sorted(set(existing + domains))
+
+        temp_file = BLOCKED_FILE.with_suffix(".tmp")
+
+        with open(temp_file, "w") as file:
+            json.dump(data, file, indent=2)
+
+        temp_file.replace(BLOCKED_FILE)
+
 def get_db_connection():
     return psycopg2.connect(database="mydb")
 
@@ -218,9 +251,12 @@ def build_rtb(the_data):
     rtb_id = str(uuid.uuid4()) # Auction ID
     data["id"] = rtb_id
     data["device"]["ua"] = the_data["latest_user_agent"]
-    data["device"]["ip"] = the_data["latest_ip"]
+    data["device"]["ip"] = (the_data["latest_ip"] or request.remote_addr)
     data["user"]["id"] = the_data["client_id"]
     data["user"]["data"][0] ["segment"] = the_data["user_segments"]
+
+    # Read blocked advertisers for this user
+    data["badv"] = get_blocked_domains()
 
     return data
 
@@ -250,14 +286,14 @@ def build_openrtb_json(client_uuid):
 
 def send_request(url, request_content):
     start = time.perf_counter()
-    response = requests.post(url, json = request_content)
+    response = requests.post(url, json = request_content, timeout=0.25)
     latency_ms = (time.perf_counter() - start) * 1000
 
     # Bid takes more than 250ms:
     if latency_ms > 250: 
         return None
 
-    if response.status_code == 204:
+    if response.status_code != 200:
         return None
 
     return response.json()
@@ -286,7 +322,7 @@ def check_if_valid(result, request_content):
         output = True
         return output
     
-    except requests.exceptions.JSONDecodeError:
+    except (KeyError, IndexError, TypeError, ValueError):
         print("Response is not valid JSON")
         return output
 
@@ -307,11 +343,9 @@ def decide_winner(bid_responses, bid_floor):
 
     burl = winning_bid["seatbid"][0]["bid"][0]["burl"]
 
-    # Request payment
-    requests.get(burl, {"AUCTION_PRICE": pay})
-
     ad_html = winning_bid["seatbid"][0]["bid"][0]["adm"]
-    return ad_html, winning_bid
+
+    return ad_html, winning_bid, pay, burl
 
 
 
@@ -380,7 +414,7 @@ def auction():
         return "", 200
 
     # Decide winner
-    ad_html, winning_bid = decide_winner(bid_responses, bid_floor)
+    ad_html, winning_bid, pay, burl = decide_winner(bid_responses, bid_floor)
     # print("here is the add html", ad_html)
 
     # Save auction history
@@ -394,10 +428,14 @@ def auction():
 
     auction_history = winning_bid.copy()
     auction_history["auction_id"] = request_content["id"]
+    auction_history["client_id"] = client_uuid
     histories.append(auction_history)
 
     with open(path, "w") as file:
         json.dump(histories, file, indent=2)
+    
+    billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
+    requests.get(billing_url, timeout=2)
     
     return ad_html, 200
 
@@ -489,24 +527,29 @@ def dump():
 def get_complaint():
     data = request.get_json()
 
+    client_uuid = request.cookies.get("boogle_id")
     auction_id = data["auction_id"]
     event = data["event"]
 
-    if event == "complaint":
-        path = Path("auction_history.json")
-        with open(path) as file:
-            histories = json.load(file)
-        for history in histories:
-            if history["id"] == auction_id:
-                adomain = history["seatbid"][0]["bid"][0]["adomain"]
+    if event != "complaint":
+        return {"status": "ignored"}, 200
 
-        with open("part4/bid_request.example.json") as request_template:
-            request_data = json.load(request_template)
-        
-        request_data["badv"].append(adomain)
+    path = Path(__file__).resolve().parent / "auction_history.json"
+
+    if not path.exists():
+        return {"error": "Auction not found"}, 404
     
-    else:
-        print("This is not a complaint.")
+    with open(path, "r") as file:
+        histories = json.load(file)
+
+    for history in histories:
+        if history["auction_id"] == auction_id:
+            adomain = history["seatbid"][0]["bid"][0]["adomain"]
+
+        save_blocked_domains(adomain)
+
+        return {"status": "ok"}, 200
+
 
     
 if __name__ == "__main__":
