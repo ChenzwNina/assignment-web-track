@@ -1,0 +1,104 @@
+[
+  {
+    "id": "cd0e0fcd-086f-4fef-a55e-4abe973b66cc",
+    "cur": "USD",
+    "seatbid": [
+      {
+        "seat": "privatebank",
+        "bid": [
+          {
+            "id": "b-82db8cb888ebade6",
+            "impid": "1",
+            "price": 6.5357,
+            "adm": "<div data-boogle-ad data-dsp=\"niche\" data-crid=\"cr-3ca507904f\" data-bid=\"b-82db8cb888ebade6\"\n     style=\"box-sizing:border-box;width:300px;height:250px;padding:24px;font:600 22px/1.3 system-ui,sans-serif;color:#fff;background:#d93025\">\n  <a href=\"https://privatebank.example/\" target=\"_blank\" rel=\"noopener\"\n     style=\"color:#fff;text-decoration:none\">Private banking, by invitation</a>\n  <div style=\"font:400 12px system-ui,sans-serif;margin-top:16px;opacity:.8\">privatebank.example</div>\n</div>",
+            "adomain": [
+              "privatebank.example"
+            ],
+            "crid": "cr-3ca507904f",
+            "attr": [
+              12
+            ],
+            "w": 300,
+            "h": 250,
+            "mtype": 1,
+            "burl": "https://webtracking.sysnet.ucsd.edu/pa1/rtb/bill/b-82db8cb888ebade6?price=${AUCTION_PRICE}"
+          }
+        ]
+      },
+      {
+        "seat": "yachtclub",
+        "bid": [
+          {
+            "id": "b-0c28bfeb358cb58b",
+            "impid": "1",
+            "price": 5.8296,
+            "adm": "<div data-boogle-ad data-dsp=\"niche\" data-crid=\"cr-5d446c29f9\" data-bid=\"b-0c28bfeb358cb58b\"\n     style=\"box-sizing:border-box;width:300px;height:250px;padding:24px;font:600 22px/1.3 system-ui,sans-serif;color:#fff;background:#f29900\">\n  <a href=\"https://yachtclub.example/\" target=\"_blank\" rel=\"noopener\"\n     style=\"color:#fff;text-decoration:none\">Charter a yacht this summer</a>\n  <div style=\"font:400 12px system-ui,sans-serif;margin-top:16px;opacity:.8\">yachtclub.example</div>\n</div>",
+            "adomain": [
+              "yachtclub.example"
+            ],
+            "crid": "cr-5d446c29f9",
+            "attr": [
+              12
+            ],
+            "w": 300,
+            "h": 250,
+            "mtype": 1,
+            "burl": "https://webtracking.sysnet.ucsd.edu/pa1/rtb/bill/b-0c28bfeb358cb58b?price=${AUCTION_PRICE}"
+          }
+        ]
+      }
+    ],
+    "auction_id": "cd0e0fcd-086f-4fef-a55e-4abe973b66cc"
+  },
+  {
+    "id": "06bef7a7-71d6-45ad-99b2-55b08cea7393",
+    "cur": "USD",
+    "seatbid": [
+      {
+        "seat": "privatebank",
+        "bid": [
+          {
+            "id": "b-3162f6169698d1c6",
+            "impid": "1",
+            "price": 9.167,
+            "adm": "<div data-boogle-ad data-dsp=\"niche\" data-crid=\"cr-3ca507904f\" data-bid=\"b-3162f6169698d1c6\"\n     style=\"box-sizing:border-box;width:300px;height:250px;padding:24px;font:600 22px/1.3 system-ui,sans-serif;color:#fff;background:#d93025\">\n  <a href=\"https://privatebank.example/\" target=\"_blank\" rel=\"noopener\"\n     style=\"color:#fff;text-decoration:none\">Private banking, by invitation</a>\n  <div style=\"font:400 12px system-ui,sans-serif;margin-top:16px;opacity:.8\">privatebank.example</div>\n</div>",
+            "adomain": [
+              "privatebank.example"
+            ],
+            "crid": "cr-3ca507904f",
+            "attr": [
+              12
+            ],
+            "w": 300,
+            "h": 250,
+            "mtype": 1,
+            "burl": "https://webtracking.sysnet.ucsd.edu/pa1/rtb/bill/b-3162f6169698d1c6?price=${AUCTION_PRICE}"
+          }
+        ]
+      },
+      {
+        "seat": "yachtclub",
+        "bid": [
+          {
+            "id": "b-eb6a1db4ba7e7d39",
+            "impid": "1",
+            "price": 5.4742,
+            "adm": "<div data-boogle-ad data-dsp=\"niche\" data-crid=\"cr-5d446c29f9\" data-bid=\"b-eb6a1db4ba7e7d39\"\n     style=\"box-sizing:border-box;width:300px;height:250px;padding:24px;font:600 22px/1.3 system-ui,sans-serif;color:#fff;background:#f29900\">\n  <a href=\"https://yachtclub.example/\" target=\"_blank\" rel=\"noopener\"\n     style=\"color:#fff;text-decoration:none\">Charter a yacht this summer</a>\n  <div style=\"font:400 12px system-ui,sans-serif;margin-top:16px;opacity:.8\">yachtclub.example</div>\n</div>",
+            "adomain": [
+              "yachtclub.example"
+            ],
+            "crid": "cr-5d446c29f9",
+            "attr": [
+              12
+            ],
+            "w": 300,
+            "h": 250,
+            "mtype": 1,
+            "burl": "https://webtracking.sysnet.ucsd.edu/pa1/rtb/bill/b-eb6a1db4ba7e7d39?price=${AUCTION_PRICE}"
+          }
+        ]
+      }
+    ],
+    "auction_id": "06bef7a7-71d6-45ad-99b2-55b08cea7393"
+  }
+]

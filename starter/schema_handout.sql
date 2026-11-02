@@ -16,6 +16,12 @@ CREATE TABLE IF NOT EXISTS requests (
     path        TEXT
 );
 
+CREATE TABLE IF NOT EXISTS agents (
+    client_id   UUID REFERENCES clients(client_id),
+    agent      TEXT,
+    time_stamp  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS searches (
     search_id   BIGSERIAL PRIMARY KEY,
     client_id   UUID REFERENCES clients(client_id),

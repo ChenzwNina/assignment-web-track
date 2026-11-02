@@ -1,10 +1,14 @@
-from flask import Flask
-from flask import render_template, redirect
-from flask import make_response
+from flask import Flask, render_template, redirect, make_response
 import uuid
 from flask import request
 import psycopg2
+import json
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from classifier import classify
+import time
+from pathlib import Path
 
 app = Flask(__name__)
 
@@ -40,6 +44,10 @@ def get_first_seen(client_uuid):
 
     if row is None:
         return None
+    
+    cur.close()
+    conn.close()
+
     return row[0]
 
 # Get last_seen
@@ -53,6 +61,8 @@ def get_last_seen(client_uuid):
     row = cur.fetchone()
     if row is None:
         return None
+    cur.close()
+    conn.close()
     return row[0]
 
 def update_last_seen(client_uuid, current_timestamp):
@@ -61,8 +71,10 @@ def update_last_seen(client_uuid, current_timestamp):
     # Open a cursor to perform database operations
     cur = conn.cursor()
     # Save last seen
-    cur.execute('UPDATE clients SET last_seen = %s WHERE client_id = %s', (current_timestamp, client_uuid,))
+    cur.execute('UPDATE clients SET last_seen = %s WHERE client_id = %s', (current_timestamp, client_uuid))
     conn.commit()
+    cur.close()
+    conn.close()
 
 def save_request(client_uuid, current_timestamp):
     # Connet app with database "mydb"
@@ -73,7 +85,7 @@ def save_request(client_uuid, current_timestamp):
     cur.execute('SELECT MAX(request_id) FROM requests')
     # print(cur.fetchall())
     row = cur.fetchone()
-    print("here it is", row[0])
+    # print("here it is", row[0])
 
     if row[0] is None:
         current_request_id = 0
@@ -90,9 +102,19 @@ def save_request(client_uuid, current_timestamp):
     # IP
     ip = request.remote_addr
 
+    # User Agent
+    agent = request.headers.get('User-Agent')
+
+    # Timestamp
+    current_timestamp = datetime.now(timezone.utc)
+    
     # Save every request into requests table
     cur.execute('INSERT INTO requests(request_id, client_id, ts, ip, referer, path) VALUES(%s, %s, %s, %s, %s, %s)', (current_request_id, client_uuid, current_timestamp, ip, referrer, path))
+    cur.execute('INSERT INTO agents(client_id, agent, time_stamp) VALUES(%s, %s, %s)', (client_uuid, agent, current_timestamp))
     conn.commit()
+
+    cur.close()
+    conn.close()
     return current_request_id
 
 def save_searches(client_uuid, current_timestamp, current_request_id, search_query):
@@ -116,11 +138,13 @@ def save_searches(client_uuid, current_timestamp, current_request_id, search_que
         max_search_id =  int(row[0])
         current_search_id = max_search_id + 1
     # print("prior", current_search_id)
-    print("current", current_search_id)
+    # print("current", current_search_id)
     # Save into query 
     cur.execute('INSERT INTO searches(search_id, client_id, request_id, query, ts) VALUES (%s, %s, %s, %s, %s)', (current_search_id, client_uuid, current_request_id, search_query, current_timestamp))
 
     conn.commit()
+    cur.close()
+    conn.close()
 
 def get_latest_ip(client_uuid):
     # Connet app with database "mydb"
@@ -137,6 +161,8 @@ def get_latest_ip(client_uuid):
     if row is None:
         return None
 
+    cur.close()
+    conn.close()
     return str(row[0])
 
 def get_all_ips(client_uuid):
@@ -154,35 +180,228 @@ def get_all_ips(client_uuid):
     for row in rows:
         if row[3] not in ips:
             ips.append(row[3])
+
+    cur.close()
+    conn.close()
     
     return ips
+
+
+def get_all_agents(client_uuid):
+    # Connet app with database "mydb"
+    conn = get_db_connection()
+    
+    # Open a cursor to perform database operations
+    cur = conn.cursor()
+
+    cur.execute("""SELECT agent FROM agents WHERE client_id = %s ORDER BY time_stamp DESC""",(client_uuid,))
+
+    rows = cur.fetchall()
+
+    all_agent = [row[0] for row in rows]
+    latest_agent = all_agent[0] if all_agent else None
+
+    cur.close()
+    conn.close()
+    return all_agent, latest_agent
+
+def get_dsp():
+    response = requests.get("https://webtracking.sysnet.ucsd.edu/pa1/rtb/")
+    data = response.json()
+    bid_list = data["bid"] # Load bid list
+    return bid_list
+
+def build_rtb(the_data):
+    with open("../starter_3_4/part4/bid_request.example.json") as file:
+        data = json.load(file)
+    
+    rtb_id = str(uuid.uuid4()) # Auction ID
+    data["id"] = rtb_id
+    data["device"]["ua"] = the_data["latest_user_agent"]
+    data["device"]["ip"] = the_data["latest_ip"]
+    data["user"]["id"] = the_data["client_id"]
+    data["user"]["data"][0] ["segment"] = the_data["user_segments"]
+
+    return data
+
+def build_openrtb_json(client_uuid):
+    # Retrieve data of the user
+    data_all_users = dump()
+    data = data_all_users.get_json()
+    client_data = data["clients"]
+
+    for client_item in client_data:
+        # print("client_item", client_item)
+        if client_item["client_id"] == client_uuid:
+            all_agents, latest_agent = get_all_agents(client_uuid)
+            # print("agents", all_agents, latest_agent)
+            client_item["user_agents"] = all_agents
+            client_item["latest_user_agent"] = latest_agent
+            the_data = client_item.copy()
+    
+    the_data["accept_languages"] = request.accept_languages
+    # print("the data", the_data)
+    the_data["user_segments"] = classify(the_data)
+
+    # Build openrtb
+    request_rtb = build_rtb(the_data)
+    return request_rtb
+
+
+def send_request(url, request_content):
+    start = time.perf_counter()
+    response = requests.post(url, json = request_content)
+    latency_ms = (time.perf_counter() - start) * 1000
+
+    # Bid takes more than 250ms:
+    if latency_ms > 250: 
+        return None
+
+    if response.status_code == 204:
+        return None
+
+    return response.json()
+
+# Check bidding from DSP
+def check_if_valid(result, request_content):
+    output = False
+    try: 
+        data = result
+        # Check id
+        imp_id = request_content["imp"][0]["id"]
+        if data["seatbid"][0]["bid"][0]["impid"] != imp_id:
+            return output
+        # Check currency
+        if data["cur"] != "USD":
+            return output
+        # Check size
+        w =  request_content["imp"][0]["banner"]["format"][0]["w"]
+        h =  request_content["imp"][0]["banner"]["format"][0]["h"]
+        if data["seatbid"][0]["bid"][0]["w"] != w or data["seatbid"][0]["bid"][0]["h"] != h:
+            return output
+        # check price
+        price = request_content["imp"][0]["bidfloor"]
+        if data["seatbid"][0]["bid"][0]["price"] < price:
+            return output
+        output = True
+        return output
+    
+    except requests.exceptions.JSONDecodeError:
+        print("Response is not valid JSON")
+        return output
+
+# Winning bid and display ad
+def decide_winner(bid_responses, bid_floor):
+    
+    sorted_bids = sorted(bid_responses, key=lambda bid: bid["seatbid"][0]["bid"][0]["price"], reverse=True)
+
+    winning_bid = sorted_bids[0]
+    highest_price = winning_bid["seatbid"][0]["bid"][0]["price"]
+
+    if len(sorted_bids) >= 2:
+        second_price = sorted_bids[1]["seatbid"][0]["bid"][0]["price"]
+    else:
+        second_price = bid_floor
+    
+    pay = min(highest_price, max(second_price, bid_floor) + 0.01)
+
+    burl = winning_bid["seatbid"][0]["bid"][0]["burl"]
+
+    # Request payment
+    requests.get(burl, {"AUCTION_PRICE": pay})
+
+    ad_html = winning_bid["seatbid"][0]["bid"][0]["adm"]
+    return ad_html, winning_bid
 
 
 
 @app.route('/', methods = ['GET'])
 def index():
-    response = make_response(render_template('boogle.html'))
+    response = make_response(render_template('new_boogle.html'))
+
+     # Get current timestamp
+    current_timestamp = datetime.now(timezone.utc)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    client_uuid = request.cookies.get("boogle_id")
 
     # Check if the user has cookies or not
-    if not request.cookies.get("boogle_id"):
+    if not client_uuid:
 
         client_uuid = str(uuid.uuid4())
         # 1-month cookie
         response.set_cookie("boogle_id", value=client_uuid, max_age=2592000, samesite="Lax")
 
-        # Get current timestamp
-        current_timestamp = datetime.now(timezone.utc)
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-
         # Save the client into clients table
         cur.execute('INSERT INTO clients(client_id, first_seen, last_seen) VALUES (%s, %s, %s)', (client_uuid, current_timestamp, current_timestamp))
-        conn.commit()
+    else:
+        cur.execute('UPDATE clients SET last_seen = %s WHERE client_id = %s', (current_timestamp, client_uuid))
+
+    # User Agent
+    agent = request.headers.get('User-Agent')
+
+    cur.execute('INSERT INTO agents(client_id, agent, time_stamp) VALUES(%s, %s, %s)', (client_uuid, agent, current_timestamp))
+    conn.commit()
+    cur.close()
+    conn.close()
 
     return response
 
+@app.route('/ad', methods = ['GET'])
+def auction():
+    # Run a single auction for the user
 
+    # Get bid list
+    bid_list = get_dsp()
+
+    # Get client id from cookie
+    client_uuid = request.cookies.get("boogle_id")
+    # Compile request content based on user id
+    request_content = build_openrtb_json(client_uuid)
+
+    # Bid floor
+    bid_floor = request_content["imp"][0]["bidfloor"]
+
+    bid_responses = []
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        bidding = [executor.submit(send_request, url, request_content) for url in bid_list]
+
+        for response in as_completed(bidding):
+            result = response.result()
+
+            # Save all bids
+            if result is not None:
+                if check_if_valid(result, request_content):
+                    bid_responses.append(result)
+    # If no bid
+    if not bid_responses:
+        return "", 200
+
+    # Decide winner
+    ad_html, winning_bid = decide_winner(bid_responses, bid_floor)
+    # print("here is the add html", ad_html)
+
+    # Save auction history
+    path = Path("auction_history.json")
+
+    if path.exists():
+        with open(path, "r") as file:
+            histories = json.load(file)
+    else:
+        histories = []
+
+    auction_history = winning_bid.copy()
+    auction_history["auction_id"] = request_content["id"]
+    histories.append(auction_history)
+
+    with open(path, "w") as file:
+        json.dump(histories, file, indent=2)
+    
+    return ad_html, 200
+
+    
 @app.route('/jsontest', methods = ['GET'])
 def jsontest():
     res = make_response({ "data" : "I am in CSE190/CSE291!"})
@@ -219,8 +438,6 @@ def search():
 
     return response
 
-
-
 @app.route('/api/history', methods = ['GET'])
 def history():
         # Get UUID from cookies
@@ -239,32 +456,57 @@ def history():
         
 @app.route('/dump', methods = ['GET'])
 def dump():
+    # Connet app with database "mydb"
+    conn = get_db_connection()
 
-        # Connet app with database "mydb"
-        conn = get_db_connection()
+    # Open a cursor to perform database operations
+    cur = conn.cursor()
+
+    # Get the biggest search id so far
+    cur.execute('SELECT client_id FROM clients')
+
+    clients = cur.fetchall()
+
+    output = []
+
+    for client in clients:
+        client_uuid = str(client[0])
+        returned_searches = get_search_queries(client_uuid)
+        first_seen = get_first_seen(client_uuid)
+        last_seen = get_last_seen(client_uuid)
+        lastest_ip = get_latest_ip(client_uuid)
+        ips = get_all_ips(client_uuid)
+
+        output.append({"client_id": f"{client_uuid}", "first_seen": first_seen, "last_seen": last_seen, "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
+
+    res = make_response({"clients": output})
+
+    cur.close()
+    conn.close()
+    return res
+
+@app.route('/ad/feedback', methods = ['POST'])
+def get_complaint():
+    data = request.get_json()
+
+    auction_id = data["auction_id"]
+    event = data["event"]
+
+    if event == "complaint":
+        path = Path("auction_history.json")
+        with open(path) as file:
+            histories = json.load(file)
+        for history in histories:
+            if history["id"] == auction_id:
+                adomain = history["seatbid"][0]["bid"][0]["adomain"]
+
+        with open("part4/bid_request.example.json") as request_template:
+            request_data = json.load(request_template)
+        
+        request_data["badv"].append(adomain)
     
-        # Open a cursor to perform database operations
-        cur = conn.cursor()
-
-        # Get the biggest search id so far
-        cur.execute('SELECT client_id FROM clients')
-
-        clients = cur.fetchall()
-
-        output = []
-
-        for client in clients:
-            client_uuid = str(client[0])
-            returned_searches = get_search_queries(client_uuid)
-            first_seen = get_first_seen(client_uuid)
-            last_seen = get_last_seen(client_uuid)
-            lastest_ip = get_latest_ip(client_uuid)
-            ips = get_all_ips(client_uuid)
-
-            output.append({"client_id": f"{client_uuid}", "first_seen": first_seen, "last_seen": last_seen, "latest_ip": lastest_ip, "ips": ips, "searches": returned_searches})
-    
-        res = make_response({"clients": output})
-        return res
+    else:
+        print("This is not a complaint.")
 
     
 if __name__ == "__main__":
