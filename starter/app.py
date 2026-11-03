@@ -318,13 +318,13 @@ def build_openrtb_json(client_uuid):
     return build_rtb(the_data)
 
 
-def send_request(url, request_content):
+def send_request(url, request_content, mt):
     start = time.perf_counter()
-    response = requests.post(url, json = request_content, timeout=0.25)
+    response = requests.post(url, json = request_content, timeout=mt*1000)
     latency_ms = (time.perf_counter() - start) * 1000
 
     # Bid takes more than 250ms:
-    if latency_ms > 250: 
+    if latency_ms > mt: 
         return None
 
     if response.status_code != 200:
@@ -333,25 +333,24 @@ def send_request(url, request_content):
     return response.json()
 
 # Check bidding from DSP
-def check_if_valid(result, request_content):
+def check_if_valid(bid, result, request_content):
     output = False
     try: 
-        data = result
         # Check id
         imp_id = request_content["imp"][0]["id"]
-        if data["seatbid"][0]["bid"][0]["impid"] != imp_id:
+        if bid["impid"] != imp_id:
             return output
         # Check currency
-        if data["cur"] != "USD":
+        if result["cur"] != "USD":
             return output
         # Check size
         w =  request_content["imp"][0]["banner"]["format"][0]["w"]
         h =  request_content["imp"][0]["banner"]["format"][0]["h"]
-        if data["seatbid"][0]["bid"][0]["w"] != w or data["seatbid"][0]["bid"][0]["h"] != h:
+        if bid["w"] != w or bid["h"] != h:
             return output
         # check price
         price = request_content["imp"][0]["bidfloor"]
-        if data["seatbid"][0]["bid"][0]["price"] < price:
+        if bid["price"] < price:
             return output
         output = True
         return output
@@ -363,21 +362,21 @@ def check_if_valid(result, request_content):
 # Winning bid and display ad
 def decide_winner(bid_responses, bid_floor):
     
-    sorted_bids = sorted(bid_responses, key=lambda bid: bid["seatbid"][0]["bid"][0]["price"], reverse=True)
+    sorted_bids = sorted(bid_responses, key=lambda bid: bid["price"], reverse=True)
 
     winning_bid = sorted_bids[0]
-    highest_price = winning_bid["seatbid"][0]["bid"][0]["price"]
+    highest_price = winning_bid["price"]
 
     if len(sorted_bids) >= 2:
-        second_price = sorted_bids[1]["seatbid"][0]["bid"][0]["price"]
+        second_price = sorted_bids[1]["price"]
     else:
         second_price = bid_floor
     
     pay = min(highest_price, max(second_price, bid_floor) + 0.01)
 
-    burl = winning_bid["seatbid"][0]["bid"][0]["burl"]
+    burl = winning_bid["burl"]
 
-    ad_html = winning_bid["seatbid"][0]["bid"][0]["adm"]
+    ad_html = winning_bid["adm"]
 
     return ad_html, winning_bid, pay, burl
 
@@ -431,14 +430,16 @@ def auction():
     # Bid floor
     bid_floor = request_content["imp"][0]["bidfloor"]
 
+    mt = request_content["tmax"]/1000
+
     bid_responses = []
 
     # Start the 250ms deadline
-    deadline = time.perf_counter() + 0.25
+    deadline = time.perf_counter() + mt
 
     executor = ThreadPoolExecutor(max_workers=max(1, len(bid_list)))
 
-    bidding = [executor.submit(send_request, url, request_content) for url in bid_list]
+    bidding = [executor.submit(send_request, url, request_content, mt) for url in bid_list]
 
     # Only wait until the shared deadline
     remaining = max(0, deadline - time.perf_counter())
@@ -449,8 +450,11 @@ def auction():
 
         # Save all bids
         if result is not None:
-            if check_if_valid(result, request_content):
-                bid_responses.append(result)
+            for seatbid in result.get("seatbid", []):
+                for bid in seatbid.get("bid", []):
+                    if check_if_valid(bid, result, request_content):
+                        bid_responses.append(bid)
+
     # If no bid
     if not bid_responses:
         return "", 200
@@ -478,6 +482,8 @@ def auction():
     
     billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
     requests.get(billing_url, timeout=2)
+
+    executor.shutdown(wait=False, cancel_futures=True)
     
     return ad_html, 200
 
@@ -587,7 +593,7 @@ def get_complaint():
 
     for history in histories:
         if history["auction_id"] == auction_id:
-            adomain = history["seatbid"][0]["bid"][0]["adomain"]
+            adomain = history["adomain"]
 
         save_blocked_domains(adomain)
 
