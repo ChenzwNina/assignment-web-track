@@ -10,10 +10,14 @@ from classifier import classify
 import time
 from pathlib import Path
 from contextlib import closing
+import logging
+from threading import Lock
+
 
 app = Flask(__name__)
 
-from threading import Lock
+app.logger.setLevel(logging.INFO)
+
 
 BLOCKED_FILE = Path(__file__).resolve().parent / "blocked_advertisers.json"
 blocked_lock = Lock()
@@ -403,6 +407,20 @@ def decide_winner(bid_responses, bid_floor):
     burl = winning_bid["burl"]
 
     ad_html = winning_bid["adm"]
+    
+    print(
+        "ALL VALID BIDS:",
+        [bid["price"] for bid in sorted_bids],
+        flush=True
+    )
+
+    print(
+        "HIGHEST PRICE:", highest_price,
+        "SECOND PRICE:", second_price,
+        "BID FLOOR:", bid_floor,
+        "FINAL PRICE:", pay,
+        flush=True
+    )
 
     return ad_html, winning_bid, pay, burl
 
@@ -479,8 +497,19 @@ def auction():
             if result is not None:
                 for seatbid in result.get("seatbid", []):
                     for bid in seatbid.get("bid", []):
+                        print(
+                            "RECEIVED BID:",
+                            bid,
+                            "CURRENCY:",
+                            result.get("cur"),
+                            flush=True
+                        )
+
                         if check_if_valid(bid, result, request_content):
+                            print("ACCEPTED BID:", bid.get("price"), flush=True)
                             bid_responses.append(bid)
+                        else:
+                            print("FILTERED BID:", bid.get("price"), flush=True)
 
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
