@@ -18,6 +18,29 @@ from threading import Lock
 BLOCKED_FILE = Path(__file__).resolve().parent / "blocked_advertisers.json"
 blocked_lock = Lock()
 
+auction_lock = Lock()
+
+AUCTION_FILE = (
+    Path(__file__).resolve().parent / "auction_history.json"
+)
+
+def save_auction_history(auction_history):
+    with auction_lock:
+        if AUCTION_FILE.exists():
+            with open(AUCTION_FILE, "r") as file:
+                histories = json.load(file)
+        else:
+            histories = []
+
+        histories.append(auction_history)
+
+        temp_file = AUCTION_FILE.with_suffix(".tmp")
+
+        with open(temp_file, "w") as file:
+            json.dump(histories, file, indent=2)
+
+        temp_file.replace(AUCTION_FILE)
+
 def load_blocked_domains():
     if not BLOCKED_FILE.exists():
         return {"badv": []}
@@ -482,11 +505,8 @@ def auction():
     auction_history = winning_bid.copy()
     auction_history["auction_id"] = request_content["id"]
     auction_history["client_id"] = client_uuid
-    histories.append(auction_history)
 
-    with open(path, "w") as file:
-        json.dump(histories, file, indent=2)
-    
+    save_auction_history(auction_history)
     billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
     requests.get(billing_url, timeout=2)
 
@@ -594,8 +614,9 @@ def get_complaint():
     if not path.exists():
         return {"error": "Auction not found"}, 404
     
-    with open(path, "r") as file:
-        histories = json.load(file)
+    with auction_lock:
+        with open(AUCTION_FILE, "r") as file:
+            histories = json.load(file)
 
     for history in histories:
         if history["auction_id"] == auction_id:
@@ -603,6 +624,7 @@ def get_complaint():
 
             save_blocked_domains(adomain)
             return {"status": "ok"}, 200
+    return {"error": "Auction not found"}, 404
 
 
     
