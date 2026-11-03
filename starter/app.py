@@ -320,11 +320,11 @@ def build_openrtb_json(client_uuid):
 
 def send_request(url, request_content, mt):
     start = time.perf_counter()
-    response = requests.post(url, json = request_content, timeout=mt*1000)
+    response = requests.post(url, json = request_content, timeout=mt)
     latency_ms = (time.perf_counter() - start) * 1000
 
     # Bid takes more than 250ms:
-    if latency_ms > mt: 
+    if latency_ms > mt * 1000: 
         return None
 
     if response.status_code != 200:
@@ -352,8 +352,11 @@ def check_if_valid(bid, result, request_content):
         price = request_content["imp"][0]["bidfloor"]
         if bid["price"] < price:
             return output
+
         output = True
         return output
+    
+
     
     except (KeyError, IndexError, TypeError, ValueError):
         print("Response is not valid JSON")
@@ -439,26 +442,30 @@ def auction():
 
     executor = ThreadPoolExecutor(max_workers=max(1, len(bid_list)))
 
-    bidding = [executor.submit(send_request, url, request_content, mt) for url in bid_list]
+    try:
+        bidding = [executor.submit(send_request, url, request_content, mt) for url in bid_list]
 
-    # Only wait until the shared deadline
-    remaining = max(0, deadline - time.perf_counter())
-    done, not_done = wait(bidding, timeout=remaining)
+        # Only wait until the shared deadline
+        remaining = max(0, deadline - time.perf_counter())
+        done, not_done = wait(bidding, timeout=remaining)
 
-    for response in done:
-        result = response.result()
+        for response in done:
+            result = response.result()
 
-        # Save all bids
-        if result is not None:
-            for seatbid in result.get("seatbid", []):
-                for bid in seatbid.get("bid", []):
-                    if check_if_valid(bid, result, request_content):
-                        bid_responses.append(bid)
+            # Save all bids
+            if result is not None:
+                for seatbid in result.get("seatbid", []):
+                    for bid in seatbid.get("bid", []):
+                        if check_if_valid(bid, result, request_content):
+                            bid_responses.append(bid)
+
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # If no bid
     if not bid_responses:
-        return "", 200
-
+            return "", 200
+    
     # Decide winner
     ad_html, winning_bid, pay, burl = decide_winner(bid_responses, bid_floor)
     # print("here is the add html", ad_html)
@@ -483,7 +490,6 @@ def auction():
     billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
     requests.get(billing_url, timeout=2)
 
-    executor.shutdown(wait=False, cancel_futures=True)
     
     return ad_html, 200
 
@@ -595,9 +601,8 @@ def get_complaint():
         if history["auction_id"] == auction_id:
             adomain = history["adomain"]
 
-        save_blocked_domains(adomain)
-
-        return {"status": "ok"}, 200
+            save_blocked_domains(adomain)
+            return {"status": "ok"}, 200
 
 
     
