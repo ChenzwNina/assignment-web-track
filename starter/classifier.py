@@ -223,17 +223,28 @@ def classify(user_data):
         for s in segments
     }
 
-    # 5. Predict without training
+    # 5. Predict without training. Only claim a segment when the model is
+    #    confident: DSPs pay nothing for an ad shown to someone outside the
+    #    audience, so a wrong claim is worse than no claim.
     final_segments = []
+    num_searches = len(user_data.get("searches") or [])
 
     for attr in ATTRIBUTES:
+        if num_searches < MIN_SEARCHES.get(attr, 0):
+            continue
+
         clf = models[attr]
         le = encoders[attr]
 
-        prediction = clf.predict(X_test)[0]
-        value = le.inverse_transform([prediction])[0]
+        proba = clf.predict_proba(X_test)[0]
+        best = int(np.argmax(proba))
+        confidence = float(proba[best])
+        value = le.inverse_transform([best])[0]
 
         if value == "unknown":
+            continue
+
+        if confidence < CONFIDENCE_THRESHOLD.get(attr, DEFAULT_CONFIDENCE):
             continue
 
         segment_id = segment_lookup.get((attr, str(value)))
@@ -242,6 +253,21 @@ def classify(user_data):
             final_segments.append({"id": segment_id})
 
     return final_segments
+
+
+# Minimum predicted probability before we claim a segment for an attribute.
+# Chosen on the dev set so that each claim is right well over half the time
+# even for users with a short search history.
+DEFAULT_CONFIDENCE = 0.5
+CONFIDENCE_THRESHOLD = {
+    "household_income": 0.6,   # weakest attribute (M-F1 target 0.24)
+    "parental_status": 0.6,
+}
+
+# Attributes that need some history before any claim is reliable
+MIN_SEARCHES = {
+    "household_income": 20,
+}
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "classifier.joblib"

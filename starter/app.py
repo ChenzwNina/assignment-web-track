@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from contextlib import closing
 import logging
-from threading import Lock
+from threading import Lock, Thread
 import math
 
 
@@ -269,22 +269,65 @@ def get_all_agents(client_uuid):
     conn.close()
     return all_agent, latest_agent
 
+RTB_BASE = "https://webtracking.sysnet.ucsd.edu/pa1/rtb/"
+
+# One shared HTTP session for all DSP traffic. It keeps TCP/TLS connections to
+# the DSP host open between auctions, so the 250ms tmax is spent waiting for
+# the DSP's answer instead of on a fresh handshake every time.
+http = requests.Session()
+http.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16))
+
+# Reused worker pool for fanning out bid requests
+dsp_executor = ThreadPoolExecutor(max_workers=8)
+
+DSP_LIST_TTL = 300  # seconds between refreshes of the DSP list
+_dsp_cache = {"urls": None, "fetched_at": 0.0}
+
 def get_dsp():
-    response = requests.get("https://webtracking.sysnet.ucsd.edu/pa1/rtb/")
-    data = response.json()
-    bid_list = data["bid"] # Load bid list
-    print("DSP LIST:", bid_list, flush=True)
-    return bid_list
+    # Fetch the DSP list once and cache it, instead of one extra HTTP round
+    # trip per auction
+    now = time.monotonic()
+    if _dsp_cache["urls"] is None or now - _dsp_cache["fetched_at"] > DSP_LIST_TTL:
+        try:
+            response = http.get(RTB_BASE, timeout=5)
+            _dsp_cache["urls"] = response.json()["bid"]
+            _dsp_cache["fetched_at"] = now
+            print("DSP LIST:", _dsp_cache["urls"], flush=True)
+        except (requests.RequestException, ValueError, KeyError):
+            if _dsp_cache["urls"] is None:
+                raise
+    return _dsp_cache["urls"]
+
+def warm_up_connections():
+    # Open one keep-alive connection per DSP (they share a host) so even the
+    # first auction after a quiet period doesn't pay for a TLS handshake
+    try:
+        n = len(get_dsp())
+    except Exception as exc:
+        print("WARM-UP: could not fetch DSP list:", exc, flush=True)
+        return
+    futures = [dsp_executor.submit(http.get, RTB_BASE, timeout=5) for _ in range(n)]
+    wait(futures, timeout=5)
+
+def keep_connections_warm(interval=60):
+    while True:
+        warm_up_connections()
+        time.sleep(interval)
+
+Thread(target=keep_connections_warm, daemon=True).start()
+
+BID_REQUEST_TEMPLATE = Path(__file__).resolve().parent / "../starter_3_4/part4/bid_request.example.json"
 
 def build_rtb(the_data):
-    with open("../starter_3_4/part4/bid_request.example.json") as file:
+    # Resolved relative to this file, not the process CWD
+    with open(BID_REQUEST_TEMPLATE) as file:
         data = json.load(file)
     
     rtb_id = str(uuid.uuid4()) # Auction ID
     data["id"] = rtb_id
-    data["device"]["ua"] = the_data["latest_user_agent"]
+    data["device"]["ua"] = the_data["latest_user_agent"] or request.headers.get("User-Agent", "")
     data["device"]["ip"] = request.remote_addr
-    data["user"]["id"] = the_data["client_id"]
+    data["user"]["id"] = the_data["client_id"] or ""
     data["user"]["data"][0] ["segment"] = the_data["user_segments"]
 
     # Read blocked advertisers for this user
@@ -293,44 +336,53 @@ def build_rtb(the_data):
     return data
 
 def build_openrtb_json(client_uuid):
+    # A browser without a (known) boogle_id still gets an auction, just with
+    # no history and therefore no segments to claim
+    first_seen = last_seen = None
+    searches, ips, agents = [], [], []
+    known_user = False
+
     # Retrieve data of the user
     with closing(get_db_connection()) as conn:
         with conn.cursor() as cur:
             
             # Get first-seen and last-seen timestamp
-            cur.execute("""SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
-            row = cur.fetchone()
+            if client_uuid:
+                cur.execute("""SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
+                row = cur.fetchone()
+                known_user = row is not None
 
-            if row is None:
-                return None
-            
-            first_seen, last_seen = row
-            
-            # Get search history
-            cur.execute("""SELECT query, ts FROM searches WHERE client_id = %s ORDER BY ts DESC, search_id DESC""", (client_uuid,))
+            if known_user:
+                first_seen, last_seen = row
+                
+                # Get search history
+                cur.execute("""SELECT query, ts FROM searches WHERE client_id = %s ORDER BY ts DESC, search_id DESC""", (client_uuid,))
 
-            searches = [
-                {"query": str(q), "ts": str(ts)}
-                for q, ts in cur.fetchall()
-            ]
+                searches = [
+                    {"query": str(q), "ts": str(ts)}
+                    for q, ts in cur.fetchall()
+                ]
 
-            # Get IP history
-            cur.execute("""SELECT ip FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC""", (client_uuid,))
+                # Get IP history
+                cur.execute("""SELECT ip FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC""", (client_uuid,))
 
-            ips = list(dict.fromkeys(
-                str(ip)
-                for (ip,) in cur.fetchall()
-                if ip is not None
-            ))
+                ips = list(dict.fromkeys(
+                    str(ip)
+                    for (ip,) in cur.fetchall()
+                    if ip is not None
+                ))
 
-            # Get user agents
-            cur.execute("""SELECT agent FROM agents WHERE client_id = %s ORDER BY time_stamp DESC""", (client_uuid,))
+                # Get user agents
+                cur.execute("""SELECT agent FROM agents WHERE client_id = %s ORDER BY time_stamp DESC""", (client_uuid,))
 
-            agents = [row[0] for row in cur.fetchall()]
+                # Distinct user agents, most recent first. The model was trained on
+                # the number of *distinct* UAs, while the agents table has one row
+                # per request.
+                agents = list(dict.fromkeys(row[0] for row in cur.fetchall() if row[0]))
 
 
     the_data = {
-        "client_id": client_uuid,
+        "client_id": client_uuid if known_user else None,
         "first_seen": first_seen,
         "last_seen": last_seen,
         "latest_ip": ips[0] if ips else None,
@@ -338,36 +390,50 @@ def build_openrtb_json(client_uuid):
         "searches": searches,
         "user_agents": agents,
         "latest_user_agent": agents[0] if agents else None,
-        "accept_languages": request.accept_languages
+        # Same shape as the training data: a list of raw Accept-Language header strings
+        "accept_languages": [request.headers["Accept-Language"]] if request.headers.get("Accept-Language") else []
     }
 
-    the_data["user_segments"] = classify(the_data)
+    # Nothing to infer from for an unknown user; otherwise never let a model
+    # error take the whole auction down
+    if not known_user:
+        the_data["user_segments"] = []
+    else:
+        try:
+            the_data["user_segments"] = classify(the_data)
+        except Exception as exc:
+            app.logger.exception("classify failed: %s", exc)
+            the_data["user_segments"] = []
 
     # Build openrtb
     return build_rtb(the_data)
 
 
-def send_request(url, request_content, mt):
-    start = time.perf_counter()
+def send_request(url, request_content, deadline):
+    # `deadline` is shared by every DSP in this auction: whatever hasn't
+    # arrived by then is ignored, no matter which DSP it came from.
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        return None
+
     try:
-        response = requests.post(
+        response = http.post(
             url,
             json=request_content,
-            timeout=mt
+            timeout=remaining
         )
-    except requests.RequestException:
-        return None
-    
-    latency_ms = (time.perf_counter() - start) * 1000
 
-    # Bid takes more than 250ms:
-    if latency_ms > mt * 1000: 
-        return None
+        # Arrived after tmax
+        if time.perf_counter() > deadline:
+            return None
 
-    if response.status_code != 200:
-        return None
+        if response.status_code != 200:
+            return None
 
-    return response.json()
+        # Not valid JSON -> treated as no bid instead of crashing the auction
+        return response.json()
+    except (requests.RequestException, ValueError):
+        return None
 
 # Check bidding from DSP
 def check_if_valid(bid, result, request_content):
@@ -377,8 +443,8 @@ def check_if_valid(bid, result, request_content):
         imp_id = request_content["imp"][0]["id"]
         if bid["impid"] != imp_id:
             return False
-        # Check currency
-        if result["cur"] != "USD":
+        # Check currency (OpenRTB: a missing `cur` means USD)
+        if result.get("cur", "USD") != "USD":
             return False
         # Check size
         w =  request_content["imp"][0]["banner"]["format"][0]["w"]
@@ -398,13 +464,18 @@ def check_if_valid(bid, result, request_content):
         if bid["price"] < price:
             return False
 
-        return True
-    
+        # A bid we can't display or bill is not a bid
+        if not isinstance(bid.get("adm"), str) or not bid["adm"].strip():
+            return False
+        if not isinstance(bid.get("burl"), str) or not bid["burl"]:
+            return False
 
-    
-    except (KeyError, IndexError, TypeError, ValueError):
-        print("Response is not valid JSON")
-        return output
+        return True
+
+    # Missing / wrongly-typed fields: malformed bid, filter it
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        print("MALFORMED BID:", bid, flush=True)
+        return False
 
 # Winning bid and display ad
 def decide_winner(bid_responses, bid_floor):
@@ -419,7 +490,7 @@ def decide_winner(bid_responses, bid_floor):
     else:
         second_price = bid_floor
     
-    pay = min(highest_price, max(second_price, bid_floor) + 0.01)
+    pay = round(min(highest_price, max(second_price, bid_floor) + 0.01), 4)
 
     burl = winning_bid["burl"]
 
@@ -476,7 +547,24 @@ def index():
 
     return response
 
+def bill_winner(billing_url):
+    try:
+        http.get(billing_url, timeout=5)
+    except requests.RequestException as exc:
+        print("BILLING FAILED:", billing_url, exc, flush=True)
+
+
 @app.route('/ad', methods = ['GET'])
+def ad():
+    # The iframe must always get a 200 with HTML: an empty slot on failure,
+    # never a Flask error page
+    try:
+        return auction()
+    except Exception as exc:
+        app.logger.exception("auction failed: %s", exc)
+        return "", 200
+
+
 def auction():
     # Run a single auction for the user
 
@@ -495,41 +583,53 @@ def auction():
 
     bid_responses = []
 
-    # Start the 250ms deadline
+    # One shared tmax deadline for every DSP, started the moment the bid
+    # requests go out (everything before this point is not the DSPs' time)
     deadline = time.perf_counter() + mt
+    bidding = [dsp_executor.submit(send_request, url, request_content, deadline) for url in bid_list]
 
-    executor = ThreadPoolExecutor(max_workers=max(1, len(bid_list)))
+    # Only wait until the shared deadline
+    done, not_done = wait(bidding, timeout=max(0, deadline - time.perf_counter()))
+    for late in not_done:
+        late.cancel()
 
-    try:
-        bidding = [executor.submit(send_request, url, request_content, mt) for url in bid_list]
+    print(
+        "AUCTION:", request_content["id"],
+        "DSP COUNT:", len(bid_list),
+        "DONE:", len(done),
+        "NOT DONE:", len(not_done),
+        "ELAPSED MS:", round((time.perf_counter() - deadline + mt) * 1000),
+        flush=True
+    )
 
-        # Only wait until the shared deadline
-        remaining = max(0, deadline - time.perf_counter())
-        done, not_done = wait(bidding, timeout=remaining)
+    for i, response in enumerate(bidding):
+        print(
+            "AUCTION:", request_content["id"],
+            "DSP:", bid_list[i],
+            "DONE:", response in done,
+            flush=True
+        )
 
-        for response in done:
-            result = response.result()
+    for response in done:
+        result = response.result()
 
-            # Save all bids
-            if result is not None:
-                for seatbid in result.get("seatbid", []):
-                    for bid in seatbid.get("bid", []):
-                        print(
-                            "RECEIVED BID:",
-                            bid,
-                            "CURRENCY:",
-                            result.get("cur"),
-                            flush=True
-                        )
+        # Save all bids
+        if isinstance(result, dict):
+            for seatbid in result.get("seatbid", []):
+                for bid in seatbid.get("bid", []):
+                    print(
+                        "RECEIVED BID:",
+                        bid,
+                        "CURRENCY:",
+                        result.get("cur"),
+                        flush=True
+                    )
 
-                        if check_if_valid(bid, result, request_content):
-                            print("ACCEPTED BID:", bid.get("price"), flush=True)
-                            bid_responses.append(bid)
-                        else:
-                            print("FILTERED BID:", bid.get("price"), flush=True)
-
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+                    if check_if_valid(bid, result, request_content):
+                        print("ACCEPTED BID:", bid.get("price"), flush=True)
+                        bid_responses.append(bid)
+                    else:
+                        print("FILTERED BID:", bid.get("price"), flush=True)
 
     # If no bid
     if not bid_responses:
@@ -539,15 +639,18 @@ def auction():
     ad_html, winning_bid, pay, burl = decide_winner(bid_responses, bid_floor)
     # print("here is the add html", ad_html)
 
-    auction_history = winning_bid.copy()
+    # Keep what /ad/feedback needs (not the creative markup itself)
+    auction_history = {k: v for k, v in winning_bid.items() if k != "adm"}
     auction_history["auction_id"] = request_content["id"]
     auction_history["client_id"] = client_uuid
+    auction_history["paid"] = pay
 
     save_auction_history(auction_history)
-    billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
-    requests.get(billing_url, timeout=2)
 
-    
+    # Bill off the response path so the ad renders right away
+    billing_url = burl.replace("${AUCTION_PRICE}", str(pay))
+    dsp_executor.submit(bill_winner, billing_url)
+
     return ad_html, 200
 
     
@@ -656,8 +759,9 @@ def get_complaint():
             histories = json.load(file)
 
     for history in histories:
-        if history["auction_id"] == auction_id:
-            adomain = history["adomain"]
+        # .get(): older entries in the file may not have these keys
+        if history.get("auction_id") == auction_id:
+            adomain = history.get("adomain") or []
 
             save_blocked_domains(adomain)
             return {"status": "ok"}, 200
