@@ -12,6 +12,7 @@ from pathlib import Path
 from contextlib import closing
 import logging
 from threading import Lock
+import math
 
 
 app = Flask(__name__)
@@ -272,6 +273,7 @@ def get_dsp():
     response = requests.get("https://webtracking.sysnet.ucsd.edu/pa1/rtb/")
     data = response.json()
     bid_list = data["bid"] # Load bid list
+    print("DSP LIST:", bid_list, flush=True)
     return bid_list
 
 def build_rtb(the_data):
@@ -281,7 +283,7 @@ def build_rtb(the_data):
     rtb_id = str(uuid.uuid4()) # Auction ID
     data["id"] = rtb_id
     data["device"]["ua"] = the_data["latest_user_agent"]
-    data["device"]["ip"] = (the_data["latest_ip"] or request.remote_addr)
+    data["device"]["ip"] = request.remote_addr
     data["user"]["id"] = the_data["client_id"]
     data["user"]["data"][0] ["segment"] = the_data["user_segments"]
 
@@ -347,7 +349,15 @@ def build_openrtb_json(client_uuid):
 
 def send_request(url, request_content, mt):
     start = time.perf_counter()
-    response = requests.post(url, json = request_content, timeout=mt)
+    try:
+        response = requests.post(
+            url,
+            json=request_content,
+            timeout=mt
+        )
+    except requests.RequestException:
+        return None
+    
     latency_ms = (time.perf_counter() - start) * 1000
 
     # Bid takes more than 250ms:
@@ -361,27 +371,34 @@ def send_request(url, request_content, mt):
 
 # Check bidding from DSP
 def check_if_valid(bid, result, request_content):
-    output = False
+
     try: 
         # Check id
         imp_id = request_content["imp"][0]["id"]
         if bid["impid"] != imp_id:
-            return output
+            return False
         # Check currency
         if result["cur"] != "USD":
-            return output
+            return False
         # Check size
         w =  request_content["imp"][0]["banner"]["format"][0]["w"]
         h =  request_content["imp"][0]["banner"]["format"][0]["h"]
         if bid["w"] != w or bid["h"] != h:
-            return output
+            return False
         # check price
         price = request_content["imp"][0]["bidfloor"]
-        if bid["price"] < price:
-            return output
+        if not isinstance(bid["price"], (int, float)):
+            return False
 
-        output = True
-        return output
+        # malformat checking
+        if isinstance(bid["price"], bool):
+            return False
+        if not math.isfinite(bid["price"]):
+            return False
+        if bid["price"] < price:
+            return False
+
+        return True
     
 
     
@@ -407,7 +424,7 @@ def decide_winner(bid_responses, bid_floor):
     burl = winning_bid["burl"]
 
     ad_html = winning_bid["adm"]
-    
+
     print(
         "ALL VALID BIDS:",
         [bid["price"] for bid in sorted_bids],
@@ -521,15 +538,6 @@ def auction():
     # Decide winner
     ad_html, winning_bid, pay, burl = decide_winner(bid_responses, bid_floor)
     # print("here is the add html", ad_html)
-
-    # Save auction history
-    path = Path("auction_history.json")
-
-    if path.exists():
-        with open(path, "r") as file:
-            histories = json.load(file)
-    else:
-        histories = []
 
     auction_history = winning_bid.copy()
     auction_history["auction_id"] = request_content["id"]
