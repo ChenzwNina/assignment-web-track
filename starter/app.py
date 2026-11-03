@@ -4,11 +4,12 @@ from flask import request
 import psycopg2
 import json
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 import requests
 from classifier import classify
 import time
 from pathlib import Path
+from contextlib import closing
 
 app = Flask(__name__)
 
@@ -62,7 +63,9 @@ def get_search_queries(client_uuid):
     # Return in required json format
     for retreived_item in retreived_items:
         returned_searches.append({"query": f"{retreived_item[0]}", "ts": f"{retreived_item[1]}"})
-    
+
+    cur.close()
+    conn.close()
     return returned_searches
 
 # Get first_seen
@@ -262,26 +265,57 @@ def build_rtb(the_data):
 
 def build_openrtb_json(client_uuid):
     # Retrieve data of the user
-    data_all_users = dump()
-    data = data_all_users.get_json()
-    client_data = data["clients"]
+    with closing(get_db_connection()) as conn:
+        with conn.cursor() as cur:
+            
+            # Get first-seen and last-seen timestamp
+            cur.execute("""SELECT to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM clients WHERE client_id = %s""", (client_uuid,))
+            row = cur.fetchone()
 
-    for client_item in client_data:
-        # print("client_item", client_item)
-        if client_item["client_id"] == client_uuid:
-            all_agents, latest_agent = get_all_agents(client_uuid)
-            # print("agents", all_agents, latest_agent)
-            client_item["user_agents"] = all_agents
-            client_item["latest_user_agent"] = latest_agent
-            the_data = client_item.copy()
-    
-    the_data["accept_languages"] = request.accept_languages
-    # print("the data", the_data)
+            if row is None:
+                return None
+            
+            first_seen, last_seen = row
+            
+            # Get search history
+            cur.execute("""SELECT query, ts FROM searches WHERE client_id = %s ORDER BY ts DESC, search_id DESC""", (client_uuid,))
+
+            searches = [
+                {"query": str(q), "ts": str(ts)}
+                for q, ts in cur.fetchall()
+            ]
+
+            # Get IP history
+            cur.execute("""SELECT ip FROM requests WHERE client_id = %s ORDER BY ts DESC, request_id DESC""", (client_uuid,))
+
+            ips = list(dict.fromkeys(
+                str(ip)
+                for (ip,) in cur.fetchall()
+                if ip is not None
+            ))
+
+            # Get user agents
+            cur.execute("""SELECT agent FROM agents WHERE client_id = %s ORDER BY time_stamp DESC""", (client_uuid,))
+
+            agents = [row[0] for row in cur.fetchall()]
+
+
+    the_data = {
+        "client_id": client_uuid,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "latest_ip": ips[0] if ips else None,
+        "ips": ips,
+        "searches": searches,
+        "user_agents": agents,
+        "latest_user_agent": agents[0] if agents else None,
+        "accept_languages": request.accept_languages
+    }
+
     the_data["user_segments"] = classify(the_data)
 
     # Build openrtb
-    request_rtb = build_rtb(the_data)
-    return request_rtb
+    return build_rtb(the_data)
 
 
 def send_request(url, request_content):
@@ -399,16 +433,24 @@ def auction():
 
     bid_responses = []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        bidding = [executor.submit(send_request, url, request_content) for url in bid_list]
+    # Start the 250ms deadline
+    deadline = time.perf_counter() + 0.25
 
-        for response in as_completed(bidding):
-            result = response.result()
+    executor = ThreadPoolExecutor(max_workers=max(1, len(bid_list)))
 
-            # Save all bids
-            if result is not None:
-                if check_if_valid(result, request_content):
-                    bid_responses.append(result)
+    bidding = [executor.submit(send_request, url, request_content) for url in bid_list]
+
+    # Only wait until the shared deadline
+    remaining = max(0, deadline - time.perf_counter())
+    done, not_done = wait(bidding, timeout=remaining)
+
+    for response in done:
+        result = response.result()
+
+        # Save all bids
+        if result is not None:
+            if check_if_valid(result, request_content):
+                bid_responses.append(result)
     # If no bid
     if not bid_responses:
         return "", 200
@@ -495,6 +537,7 @@ def history():
 @app.route('/dump', methods = ['GET'])
 def dump():
     # Connet app with database "mydb"
+
     conn = get_db_connection()
 
     # Open a cursor to perform database operations
